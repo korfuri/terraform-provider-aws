@@ -109,7 +109,6 @@ func resourceAwsDbInstance() *schema.Resource {
 				Type:          schema.TypeString,
 				Optional:      true,
 				Computed:      true,
-				ForceNew:      true,
 				ConflictsWith: []string{"identifier_prefix"},
 				ValidateFunc:  validateRdsIdentifier,
 			},
@@ -117,7 +116,6 @@ func resourceAwsDbInstance() *schema.Resource {
 				Type:         schema.TypeString,
 				Optional:     true,
 				Computed:     true,
-				ForceNew:     true,
 				ValidateFunc: validateRdsIdentifierPrefix,
 			},
 
@@ -427,6 +425,27 @@ func resourceAwsDbInstance() *schema.Resource {
 	}
 }
 
+func resourceAwsDbInstanceMakeIdentifier(d *schema.ResourceData) string {
+	var identifier string
+	if v, ok := d.GetOk("identifier"); ok {
+		identifier = v.(string)
+	} else {
+		if v, ok := d.GetOk("identifier_prefix"); ok {
+			identifier = resource.PrefixedUniqueId(v.(string))
+		} else {
+			identifier = resource.UniqueId()
+		}
+
+		// SQL Server identifier size is max 15 chars, so truncate
+		if engine := d.Get("engine").(string); engine != "" {
+			if strings.Contains(strings.ToLower(engine), "sqlserver") {
+				identifier = identifier[:15]
+			}
+		}
+	}
+	return identifier
+}
+
 func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).rdsconn
 
@@ -448,25 +467,9 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 
 	tags := tagsFromMapRDS(d.Get("tags").(map[string]interface{}))
 
-	var identifier string
-	if v, ok := d.GetOk("identifier"); ok {
-		identifier = v.(string)
-	} else {
-		if v, ok := d.GetOk("identifier_prefix"); ok {
-			identifier = resource.PrefixedUniqueId(v.(string))
-		} else {
-			identifier = resource.UniqueId()
-		}
-
-		// SQL Server identifier size is max 15 chars, so truncate
-		if engine := d.Get("engine").(string); engine != "" {
-			if strings.Contains(strings.ToLower(engine), "sqlserver") {
-				identifier = identifier[:15]
-			}
-		}
-		d.Set("identifier", identifier)
-	}
-
+	identifier := resourceAwsDbInstanceMakeIdentifier(d)
+	d.Set("identifier", identifier)
+	
 	if v, ok := d.GetOk("replicate_source_db"); ok {
 		opts := rds.CreateDBInstanceReadReplicaInput{
 			AutoMinorVersionUpgrade:    aws.Bool(d.Get("auto_minor_version_upgrade").(bool)),
@@ -476,7 +479,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 			DBInstanceIdentifier:       aws.String(identifier),
 			PubliclyAccessible:         aws.Bool(d.Get("publicly_accessible").(bool)),
 			SourceDBInstanceIdentifier: aws.String(v.(string)),
-			Tags:                       tags,
+			Tags: tags,
 		}
 
 		if attr, ok := d.GetOk("allocated_storage"); ok {
@@ -736,7 +739,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		stateConf := &resource.StateChangeConf{
 			Pending:    resourceAwsDbInstanceCreatePendingStates,
 			Target:     []string{"available", "storage-optimization"},
-			Refresh:    resourceAwsDbInstanceStateRefreshFunc(d.Id(), conn),
+			Refresh:    resourceAwsDbInstanceStateRefreshFunc(d.Get("identifier").(string), conn),
 			Timeout:    d.Timeout(schema.TimeoutCreate),
 			MinTimeout: 10 * time.Second,
 			Delay:      30 * time.Second, // Wait 30 secs before starting
@@ -1064,7 +1067,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 	stateConf := &resource.StateChangeConf{
 		Pending:    resourceAwsDbInstanceCreatePendingStates,
 		Target:     []string{"available", "storage-optimization"},
-		Refresh:    resourceAwsDbInstanceStateRefreshFunc(d.Id(), conn),
+		Refresh:    resourceAwsDbInstanceStateRefreshFunc(d.Get("identifier").(string), conn),
 		Timeout:    d.Timeout(schema.TimeoutCreate),
 		MinTimeout: 10 * time.Second,
 		Delay:      30 * time.Second, // Wait 30 secs before starting
@@ -1077,7 +1080,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 	}
 
 	if requiresModifyDbInstance {
-		modifyDbInstanceInput.DBInstanceIdentifier = aws.String(d.Id())
+		modifyDbInstanceInput.DBInstanceIdentifier = aws.String(d.Get("identifier").(string))
 
 		log.Printf("[INFO] DB Instance (%s) configuration requires ModifyDBInstance: %s", d.Id(), modifyDbInstanceInput)
 		_, err := conn.ModifyDBInstance(modifyDbInstanceInput)
@@ -1086,7 +1089,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		}
 
 		log.Printf("[INFO] Waiting for DB Instance (%s) to be available", d.Id())
-		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Id(), conn, d.Timeout(schema.TimeoutUpdate))
+		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Get("identifier").(string), conn, d.Timeout(schema.TimeoutUpdate))
 		if err != nil {
 			return fmt.Errorf("error waiting for DB Instance (%s) to be available: %s", d.Id(), err)
 		}
@@ -1094,7 +1097,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 
 	if requiresRebootDbInstance {
 		rebootDbInstanceInput := &rds.RebootDBInstanceInput{
-			DBInstanceIdentifier: aws.String(d.Id()),
+			DBInstanceIdentifier: aws.String(d.Get("identifier").(string)),
 		}
 
 		log.Printf("[INFO] DB Instance (%s) configuration requires RebootDBInstance: %s", d.Id(), rebootDbInstanceInput)
@@ -1104,7 +1107,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		}
 
 		log.Printf("[INFO] Waiting for DB Instance (%s) to be available", d.Id())
-		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Id(), conn, d.Timeout(schema.TimeoutUpdate))
+		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Get("identifier").(string), conn, d.Timeout(schema.TimeoutUpdate))
 		if err != nil {
 			return fmt.Errorf("error waiting for DB Instance (%s) to be available: %s", d.Id(), err)
 		}
@@ -1114,7 +1117,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 }
 
 func resourceAwsDbInstanceRead(d *schema.ResourceData, meta interface{}) error {
-	v, err := resourceAwsDbInstanceRetrieve(d.Id(), meta.(*AWSClient).rdsconn)
+	v, err := resourceAwsDbInstanceRetrieve(d.Get("identifier").(string), meta.(*AWSClient).rdsconn)
 
 	if err != nil {
 		return err
@@ -1255,7 +1258,7 @@ func resourceAwsDbInstanceDelete(d *schema.ResourceData, meta interface{}) error
 
 	log.Printf("[DEBUG] DB Instance destroy: %v", d.Id())
 
-	opts := rds.DeleteDBInstanceInput{DBInstanceIdentifier: aws.String(d.Id())}
+	opts := rds.DeleteDBInstanceInput{DBInstanceIdentifier: aws.String(d.Get("identifier").(string))}
 
 	skipFinalSnapshot := d.Get("skip_final_snapshot").(bool)
 	opts.SkipFinalSnapshot = aws.Bool(skipFinalSnapshot)
@@ -1277,14 +1280,14 @@ func resourceAwsDbInstanceDelete(d *schema.ResourceData, meta interface{}) error
 	}
 
 	log.Println("[INFO] Waiting for DB Instance to be destroyed")
-	return waitUntilAwsDbInstanceIsDeleted(d.Id(), conn, d.Timeout(schema.TimeoutDelete))
+	return waitUntilAwsDbInstanceIsDeleted(d.Get("identifier").(string), conn, d.Timeout(schema.TimeoutDelete))
 }
 
-func waitUntilAwsDbInstanceIsAvailableAfterUpdate(id string, conn *rds.RDS, timeout time.Duration) error {
+func waitUntilAwsDbInstanceIsAvailableAfterUpdate(dbidentifier string, conn *rds.RDS, timeout time.Duration) error {
 	stateConf := &resource.StateChangeConf{
 		Pending:    resourceAwsDbInstanceUpdatePendingStates,
 		Target:     []string{"available", "storage-optimization"},
-		Refresh:    resourceAwsDbInstanceStateRefreshFunc(id, conn),
+		Refresh:    resourceAwsDbInstanceStateRefreshFunc(dbidentifier, conn),
 		Timeout:    timeout,
 		MinTimeout: 10 * time.Second,
 		Delay:      30 * time.Second, // Wait 30 secs before starting
@@ -1293,11 +1296,11 @@ func waitUntilAwsDbInstanceIsAvailableAfterUpdate(id string, conn *rds.RDS, time
 	return err
 }
 
-func waitUntilAwsDbInstanceIsDeleted(id string, conn *rds.RDS, timeout time.Duration) error {
+func waitUntilAwsDbInstanceIsDeleted(dbidentifier string, conn *rds.RDS, timeout time.Duration) error {
 	stateConf := &resource.StateChangeConf{
 		Pending:    resourceAwsDbInstanceDeletePendingStates,
 		Target:     []string{},
-		Refresh:    resourceAwsDbInstanceStateRefreshFunc(id, conn),
+		Refresh:    resourceAwsDbInstanceStateRefreshFunc(dbidentifier, conn),
 		Timeout:    timeout,
 		MinTimeout: 10 * time.Second,
 		Delay:      30 * time.Second, // Wait 30 secs before starting
@@ -1313,7 +1316,7 @@ func resourceAwsDbInstanceUpdate(d *schema.ResourceData, meta interface{}) error
 
 	req := &rds.ModifyDBInstanceInput{
 		ApplyImmediately:     aws.Bool(d.Get("apply_immediately").(bool)),
-		DBInstanceIdentifier: aws.String(d.Id()),
+		DBInstanceIdentifier: aws.String(d.Get("identifier").(string)),
 	}
 
 	d.SetPartial("apply_immediately")
@@ -1323,6 +1326,15 @@ func resourceAwsDbInstanceUpdate(d *schema.ResourceData, meta interface{}) error
 	}
 
 	requestUpdate := false
+	if d.HasChange("identifier") || d.HasChange("identifier_prefix") {
+		d.SetPartial("identifier")
+		d.SetPartial("identifier_prefix")	
+		old, _ := d.GetChange("identifier")
+		req.DBInstanceIdentifier = aws.String(old.(string))
+		new := resourceAwsDbInstanceMakeIdentifier(d)
+		req.NewDBInstanceIdentifier = aws.String(new)
+		requestUpdate = true
+	}
 	if d.HasChange("allocated_storage") || d.HasChange("iops") {
 		d.SetPartial("allocated_storage")
 		d.SetPartial("iops")
@@ -1477,7 +1489,7 @@ func resourceAwsDbInstanceUpdate(d *schema.ResourceData, meta interface{}) error
 		}
 
 		log.Printf("[DEBUG] Waiting for DB Instance (%s) to be available", d.Id())
-		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Id(), conn, d.Timeout(schema.TimeoutUpdate))
+		err = waitUntilAwsDbInstanceIsAvailableAfterUpdate(d.Get("identifier").(string), conn, d.Timeout(schema.TimeoutUpdate))
 		if err != nil {
 			return fmt.Errorf("error waiting for DB Instance (%s) to be available: %s", d.Id(), err)
 		}
@@ -1488,7 +1500,7 @@ func resourceAwsDbInstanceUpdate(d *schema.ResourceData, meta interface{}) error
 		if d.Get("replicate_source_db").(string) == "" {
 			// promote
 			opts := rds.PromoteReadReplicaInput{
-				DBInstanceIdentifier: aws.String(d.Id()),
+				DBInstanceIdentifier: aws.String(d.Get("identifier").(string)),
 			}
 			attr := d.Get("backup_retention_period")
 			opts.BackupRetentionPeriod = aws.Int64(int64(attr.(int)))
@@ -1522,9 +1534,9 @@ func resourceAwsDbInstanceUpdate(d *schema.ResourceData, meta interface{}) error
 // API. It returns an error if there is a communication problem or unexpected
 // error with AWS. When the DBInstance is not found, it returns no error and a
 // nil pointer.
-func resourceAwsDbInstanceRetrieve(id string, conn *rds.RDS) (*rds.DBInstance, error) {
+func resourceAwsDbInstanceRetrieve(dbidentifier string, conn *rds.RDS) (*rds.DBInstance, error) {
 	opts := rds.DescribeDBInstancesInput{
-		DBInstanceIdentifier: aws.String(id),
+		DBInstanceIdentifier: aws.String(dbidentifier),
 	}
 
 	log.Printf("[DEBUG] DB Instance describe configuration: %#v", opts)
@@ -1538,7 +1550,7 @@ func resourceAwsDbInstanceRetrieve(id string, conn *rds.RDS) (*rds.DBInstance, e
 	}
 
 	if len(resp.DBInstances) != 1 ||
-		*resp.DBInstances[0].DBInstanceIdentifier != id {
+		*resp.DBInstances[0].DBInstanceIdentifier != dbidentifier {
 		if err != nil {
 			return nil, nil
 		}
@@ -1556,9 +1568,9 @@ func resourceAwsDbInstanceImport(
 	return []*schema.ResourceData{d}, nil
 }
 
-func resourceAwsDbInstanceStateRefreshFunc(id string, conn *rds.RDS) resource.StateRefreshFunc {
+func resourceAwsDbInstanceStateRefreshFunc(dbidentifier string, conn *rds.RDS) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
-		v, err := resourceAwsDbInstanceRetrieve(id, conn)
+		v, err := resourceAwsDbInstanceRetrieve(dbidentifier, conn)
 
 		if err != nil {
 			log.Printf("Error on retrieving DB Instance when waiting: %s", err)
@@ -1570,7 +1582,7 @@ func resourceAwsDbInstanceStateRefreshFunc(id string, conn *rds.RDS) resource.St
 		}
 
 		if v.DBInstanceStatus != nil {
-			log.Printf("[DEBUG] DB Instance status for instance %s: %s", id, *v.DBInstanceStatus)
+			log.Printf("[DEBUG] DB Instance status for instance %s: %s", dbidentifier, *v.DBInstanceStatus)
 		}
 
 		return v, *v.DBInstanceStatus, nil
